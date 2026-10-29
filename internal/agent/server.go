@@ -12,6 +12,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"reposync/internal/node"
 	"reposync/internal/repo"
@@ -29,6 +30,12 @@ var codes = map[string]error{
 	"no_commits":   repo.ErrNoCommits,
 	"unknown_repo": node.ErrUnknownRepo,
 	"missing":      node.ErrMissing,
+	"locked":       repo.ErrLocked,
+}
+
+type leaseReq struct {
+	Holder string `json:"holder"`
+	TTL    int    `json:"ttlSeconds"`
 }
 
 type applyReq struct {
@@ -49,6 +56,22 @@ func NewServer(n *node.Node, token string, logger *log.Logger) http.Handler {
 	mux.HandleFunc("GET /v1/hello", func(w http.ResponseWriter, r *http.Request) {
 		h, _ := n.Hello(r.Context())
 		writeJSON(w, h)
+	})
+	mux.HandleFunc("GET /v1/doctor", func(w http.ResponseWriter, r *http.Request) {
+		rep, err := n.Doctor(r.Context())
+		reply(w, rep, err)
+	})
+	mux.HandleFunc("POST /v1/repos/{name}/lease", func(w http.ResponseWriter, r *http.Request) {
+		var req leaseReq
+		if !readJSON(w, r, &req) {
+			return
+		}
+		err := n.Lease(r.Context(), r.PathValue("name"), req.Holder, time.Duration(req.TTL)*time.Second)
+		reply(w, struct{}{}, err)
+	})
+	mux.HandleFunc("DELETE /v1/repos/{name}/lease", func(w http.ResponseWriter, r *http.Request) {
+		err := n.Release(r.Context(), r.PathValue("name"), r.URL.Query().Get("holder"))
+		reply(w, struct{}{}, err)
 	})
 	mux.HandleFunc("GET /v1/repos/{name}/state", func(w http.ResponseWriter, r *http.Request) {
 		s, err := n.State(r.Context(), r.PathValue("name"))
