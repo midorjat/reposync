@@ -127,6 +127,22 @@ func (c *Client) Base(ctx context.Context, name, peer string) (*repo.Base, error
 	return b, err
 }
 
+func (c *Client) Lease(ctx context.Context, name, holder string, ttl time.Duration) error {
+	var out struct{}
+	return c.json(ctx, "POST", repoPath(name, "/lease"), leaseReq{Holder: holder, TTL: int(ttl.Seconds())}, &out)
+}
+
+func (c *Client) Release(ctx context.Context, name, holder string) error {
+	var out struct{}
+	return c.json(ctx, "DELETE", repoPath(name, "/lease?holder="+url.QueryEscape(holder)), nil, &out)
+}
+
+func (c *Client) Doctor(ctx context.Context) (node.Report, error) {
+	var r node.Report
+	err := c.json(ctx, "GET", "/v1/doctor", nil, &r)
+	return r, err
+}
+
 func (c *Client) SetBase(ctx context.Context, name, peer string, b repo.Base) error {
 	var out struct{}
 	return c.json(ctx, "PUT", repoPath(name, "/base/"+url.PathEscape(peer)), b, &out)

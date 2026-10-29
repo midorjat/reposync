@@ -10,12 +10,13 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"reposync/internal/config"
 	"reposync/internal/repo"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 var (
 	ErrUnknownRepo = errors.New("repo is not in this machine's config")
@@ -37,10 +38,16 @@ type Peer interface {
 	KeepWork(ctx context.Context, name, from string) (string, error)
 	Base(ctx context.Context, name, peer string) (*repo.Base, error)
 	SetBase(ctx context.Context, name, peer string, b repo.Base) error
+	Lease(ctx context.Context, name, holder string, ttl time.Duration) error
+	Release(ctx context.Context, name, holder string) error
+	Doctor(ctx context.Context) (Report, error)
 }
 
 type Node struct {
 	Cfg *config.Config
+	// OnApplied, if set, is called after this machine's working copy was
+	// changed to another machine's state (from = that machine's host).
+	OnApplied func(name, from string, s repo.State)
 	// git dislikes concurrent writers, and the agent may be asked to work
 	// on a repo while a local command is running; serialize everything.
 	mu sync.Mutex
@@ -122,7 +129,29 @@ func (n *Node) Apply(_ context.Context, name, from, expect string) (repo.State, 
 	if err != nil {
 		return repo.State{}, err
 	}
-	return repo.Apply(dir, n.Cfg.Host, target, expect)
+	s, err := repo.Apply(dir, n.Cfg.Host, target, expect)
+	if err == nil && n.OnApplied != nil {
+		n.OnApplied(name, from, s)
+	}
+	return s, err
+}
+
+// Lease and Release don't take n.mu: the lease is what keeps whole syncs
+// apart, and it has to be acquirable while another operation runs.
+func (n *Node) Lease(_ context.Context, name, holder string, ttl time.Duration) error {
+	dir, err := n.Dir(name)
+	if err != nil {
+		return err
+	}
+	return repo.AcquireLease(dir, holder, ttl)
+}
+
+func (n *Node) Release(_ context.Context, name, holder string) error {
+	dir, err := n.Dir(name)
+	if err != nil {
+		return err
+	}
+	return repo.ReleaseLease(dir, holder)
 }
 
 func (n *Node) KeepWork(_ context.Context, name, from string) (string, error) {

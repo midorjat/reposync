@@ -10,9 +10,12 @@ package syncer
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"reposync/internal/node"
 	"reposync/internal/repo"
@@ -130,8 +133,36 @@ func (p Plan) fail(err error) Plan {
 	return p
 }
 
-// Run carries out a plan and describes what it did.
-func (s *Syncer) Run(ctx context.Context, p Plan) (string, error) {
+// leaseTTL bounds how long a crashed sync can block the next one.
+const leaseTTL = 15 * time.Minute
+
+// Sync locks the repo on both machines, plans, and carries out the plan.
+// Planning under the lock means a sync the other machine just finished is
+// taken into account. It returns the plan and a description of what it did.
+func (s *Syncer) Sync(ctx context.Context, name string, take Side) (Plan, string, error) {
+	holder := s.holder()
+	if err := s.Local.Lease(ctx, name, holder, leaseTTL); err != nil {
+		return Plan{Repo: name, Action: Failed, Err: err}, "", err
+	}
+	defer s.Local.Release(context.WithoutCancel(ctx), name, holder)
+	if err := s.Peer.Lease(ctx, name, holder, leaseTTL); err != nil {
+		err = fmt.Errorf("%s: %w", s.PeerHost, err)
+		return Plan{Repo: name, Action: Failed, Err: err}, "", err
+	}
+	defer s.Peer.Release(context.WithoutCancel(ctx), name, holder)
+
+	p := s.Plan(ctx, name, take)
+	msg, err := s.run(ctx, p)
+	return p, msg, err
+}
+
+func (s *Syncer) holder() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return fmt.Sprintf("%s/%d/%s", s.LocalHost, os.Getpid(), hex.EncodeToString(b))
+}
+
+func (s *Syncer) run(ctx context.Context, p Plan) (string, error) {
 	switch p.Action {
 	case Failed:
 		return "", p.Err

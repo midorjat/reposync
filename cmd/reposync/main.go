@@ -21,6 +21,8 @@ import (
 
 	"reposync/internal/agent"
 	"reposync/internal/config"
+	"reposync/internal/desktop"
+	"reposync/internal/doctor"
 	"reposync/internal/node"
 	"reposync/internal/syncer"
 )
@@ -38,6 +40,8 @@ Commands:
   bootstrap  clone repos from the config that are missing on this machine
   backups    list saved states of a repo
   undo       restore the state from before the last sync (or --to ID)
+  doctor     check that both machines are set up the same way
+  autostart  on|off: start the tray app (reposync-tray) when you log in
   version    print the version
 
 Run "reposync <command> -h" for a command's flags.
@@ -80,6 +84,10 @@ func main() {
 		err = cmdBackups(*cfgPath, args)
 	case "undo":
 		err = cmdUndo(*cfgPath, args)
+	case "doctor":
+		err = cmdDoctor(ctx, *cfgPath, args)
+	case "autostart":
+		err = cmdAutostart(args)
 	case "version":
 		fmt.Println("reposync", node.Version)
 	default:
@@ -292,8 +300,7 @@ func cmdSync(ctx context.Context, cfgPath string, args []string) error {
 
 	failed := 0
 	for _, name := range names {
-		p := s.Plan(ctx, name, side)
-		msg, err := s.Run(ctx, p)
+		_, msg, err := s.Sync(ctx, name, side)
 		if err != nil {
 			failed++
 			fmt.Printf("%-20s error: %v\n", name, err)
@@ -383,5 +390,74 @@ func cmdUndo(cfgPath string, args []string) error {
 	fmt.Printf("restored backup %s, now %s\n", b.ID, s.Label())
 	fmt.Println("The current state was backed up too, so this undo can itself be undone.")
 	fmt.Println("The next sync of this repo will ask which machine wins (--take).")
+	return nil
+}
+
+func cmdDoctor(ctx context.Context, cfgPath string, args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	fs.Parse(args)
+	cfg, n, err := load(cfgPath)
+	if err != nil {
+		return err
+	}
+	local, err := n.Doctor(ctx)
+	if err != nil {
+		return err
+	}
+	var peer *node.Report
+	var peerErr error
+	if u, err := cfg.PeerURL(); err != nil {
+		peerErr = err
+	} else if rep, err := agent.NewClient(u, cfg.Token).Doctor(ctx); err != nil {
+		peerErr = err
+	} else {
+		peer = &rep
+	}
+
+	findings := doctor.Check(&local, peer)
+	if peerErr != nil {
+		findings = append(findings, doctor.Finding{Level: doctor.Fail, Text: "peer: " + peerErr.Error(),
+			Advice: "is reposync (serve or the tray app) running on the other machine, and allowed through its firewall?"})
+	}
+	if v, _ := desktop.Autostart(); v == "" {
+		findings = append(findings, doctor.Finding{Level: doctor.Warn, Text: "the tray app doesn't start at login", Advice: "reposync autostart on"})
+	}
+	failed := false
+	for _, f := range findings {
+		where := ""
+		if f.Repo != "" {
+			where = f.Repo + ": "
+		}
+		fmt.Printf("[%s] %s%s\n", f.Level, where, f.Text)
+		if f.Advice != "" {
+			fmt.Printf("       -> %s\n", f.Advice)
+		}
+		failed = failed || f.Level == doctor.Fail
+	}
+	if failed {
+		return errors.New("problems found")
+	}
+	fmt.Println("\nAll good.")
+	return nil
+}
+
+func cmdAutostart(args []string) error {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off" && args[0] != "status") {
+		return errors.New("usage: reposync autostart on|off|status")
+	}
+	if args[0] != "status" {
+		if err := desktop.SetAutostart(args[0] == "on"); err != nil {
+			return err
+		}
+	}
+	v, err := desktop.Autostart()
+	if err != nil {
+		return err
+	}
+	if v == "" {
+		fmt.Println("autostart is off")
+	} else {
+		fmt.Println("autostart is on:", v)
+	}
 	return nil
 }

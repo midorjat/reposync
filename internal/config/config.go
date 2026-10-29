@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -26,7 +27,26 @@ type Config struct {
 	Peer   string `toml:"peer"`
 	Token  string `toml:"token"`
 	Root   string `toml:"root"`
+	Auto   Auto   `toml:"auto"`
 	Repos  []Repo `toml:"repo"`
+}
+
+// Auto configures what the tray agent does on its own.
+type Auto struct {
+	Enabled  *bool  `toml:"enabled"`  // default true
+	Interval string `toml:"interval"` // re-check while the peer is reachable; default 10m
+	Notify   *bool  `toml:"notify"`   // default true
+}
+
+func (a Auto) On() bool        { return a.Enabled == nil || *a.Enabled }
+func (a Auto) Notifying() bool { return a.Notify == nil || *a.Notify }
+
+func (a Auto) Every() time.Duration {
+	d, err := time.ParseDuration(a.Interval)
+	if err != nil || d < time.Minute {
+		return 10 * time.Minute
+	}
+	return d
 }
 
 // Names end up in URLs and git ref names, so keep them plain.
@@ -68,6 +88,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Token == "" {
 		return fmt.Errorf("token is empty")
+	}
+	if c.Auto.Interval != "" {
+		if _, err := time.ParseDuration(c.Auto.Interval); err != nil {
+			return fmt.Errorf("auto.interval %q: use a duration like '10m' or '1h'", c.Auto.Interval)
+		}
 	}
 	seen := map[string]bool{}
 	for _, r := range c.Repos {
@@ -139,6 +164,14 @@ peer  = '%s'           # the other machine: name, name:port or http://name:port
 token = '%s'           # must be identical on both machines - keep it secret
 root  = '%s'           # relative repo paths are resolved from here
 # listen = ':%s'
+
+# What the tray app (reposync-tray) does on its own. It syncs when the other
+# machine shows up on the network, after waking from sleep, and every
+# 'interval' while both are reachable. Conflicts always wait for you.
+[auto]
+enabled  = true
+interval = '10m'
+notify   = true
 
 # [[repo]]
 # name = 'api'                              # same name on both machines
